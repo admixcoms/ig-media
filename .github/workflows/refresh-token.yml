@@ -1,0 +1,22 @@
+name: refresh-token
+
+on:
+  schedule:
+    - cron: "0 18 * * 0"    # 매주 월요일 03:00 KST
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: refresh instagram tokens
+        env:
+          IG_ACCOUNTS: ${{ secrets.IG_ACCOUNTS }}
+        run: python publisher/refresh_tokens.py "$RUNNER_TEMP/accounts.json"
+      - name: save new tokens
+        env:
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+        run: |
+          gh secret set IG_ACCOUNTS --repo "$GITHUB_REPOSITORY" < "$RUNNER_TEMP/accounts.json"
+          rm -f "$RUNNER_TEMP/accounts.json"
