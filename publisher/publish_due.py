@@ -5,7 +5,7 @@
 게시 후 published.json 을 남기고 jpg 는 지운다 (커밋은 워크플로 다음 단계에서).
 계정 정보: 환경변수 IG_ACCOUNTS = {"<client>": {"token": "...", "user_id": "..."}}
 """
-import datetime, json, os, pathlib, sys, time, urllib.error, urllib.parse, urllib.request
+import datetime, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
 GRAPH = "https://graph.instagram.com"
@@ -76,8 +76,25 @@ def publish(post_dir, acct):
     return info.get("permalink")
 
 
+PUBLISH_AT = datetime.time(7, 30)   # 50·60대 활동 시간. 이 시각 전에는 절대 게시하지 않는다
+
+
+def wait_until_publish_time():
+    """예약 실행은 GitHub 사정으로 늦게 시작될 수 있어 일찍 신청해 두고, 07:30까지 기다린다."""
+    now = datetime.datetime.now(KST)
+    target = datetime.datetime.combine(now.date(), PUBLISH_AT, KST)
+    if now < target:
+        wait = (target - now).total_seconds()
+        print(f"[wait] {target:%H:%M} 게시 시각까지 {wait / 60:.0f}분 대기", flush=True)
+        time.sleep(wait)
+        # 기다리는 동안 승인된 게시물이 있을 수 있으니 최신 상태로 갱신
+        subprocess.run(["git", "pull", "--rebase", "--quiet"], cwd=ROOT, check=False)
+
+
 def main():
     accounts = json.loads(os.environ["IG_ACCOUNTS"])
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        wait_until_publish_time()
     today = datetime.datetime.now(KST).date().isoformat()
     failed = False
     for meta_file in sorted(ROOT.glob("queue/*/*/meta.json")):
