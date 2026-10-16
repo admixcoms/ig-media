@@ -1,14 +1,14 @@
 name: publish
 
 on:
-  # GitHub 예약 실행은 몇 시간씩 늦게 시작되기도 해서 일찍 신청해 둔다.
-  # 일찍 시작된 실행은 07:30 KST까지 기다렸다가 게시한다 (07:30 전 게시 없음).
-  # 06:30, 07:30 신청분은 예비. 이미 게시된 날은 아무것도 하지 않는다.
+  # 주 실행: PC 작업 스케줄러가 매일 07:25에 즉시 실행(dispatch)을 요청한다 (scripts/trigger_publish.py).
+  # 아래 GitHub 예약은 PC가 꺼졌을 때를 위한 예비 (지연·누락이 잦음).
+  # 어떤 방식이든 07:30 KST 전이면 기다렸다가 게시한다. 이미 게시된 날은 아무것도 하지 않는다.
   schedule:
     - cron: "30 20 * * *"   # 05:30 KST
     - cron: "30 21 * * *"   # 06:30 KST
     - cron: "30 22 * * *"   # 07:30 KST
-  workflow_dispatch: {}      # 늦게 승인된 게시물 즉시 발행용 (대기 없이 바로 게시)
+  workflow_dispatch: {}      # PC 07:25 실행 요청, 늦게 승인된 게시물 즉시 발행 (07:30 이후면 바로 게시)
 
 permissions:
   contents: write
