@@ -80,7 +80,7 @@ PUBLISH_AT = datetime.time(7, 30)   # 50·60대 활동 시간. 이 시각 전에
 
 
 def wait_until_publish_time():
-    """예약 실행은 GitHub 사정으로 늦게 시작될 수 있어 일찍 신청해 두고, 07:30까지 기다린다."""
+    """07:30 전에 시작된 실행은 07:30까지 기다린다. 07:30 이후 시작이면 바로 게시."""
     now = datetime.datetime.now(KST)
     target = datetime.datetime.combine(now.date(), PUBLISH_AT, KST)
     if now < target:
@@ -93,8 +93,8 @@ def wait_until_publish_time():
 
 def main():
     accounts = json.loads(os.environ["IG_ACCOUNTS"])
-    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
-        wait_until_publish_time()
+    # 예약 실행이든 PC의 07:25 즉시 실행 요청(dispatch)이든 07:30 전이면 기다린다
+    wait_until_publish_time()
     today = datetime.datetime.now(KST).date().isoformat()
     failed = False
     for meta_file in sorted(ROOT.glob("queue/*/*/meta.json")):
