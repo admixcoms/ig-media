@@ -27,7 +27,53 @@ def call(method, path, token, params=None):
         with urllib.request.urlopen(urllib.request.Request(url, data=data, method=method), timeout=60) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')}") from None
+        body = e.read().decode(errors="replace")
+        if e.code in (403, 429) and ("request limit" in body or '"code":4' in body or "2207051" in body):
+            raise RateLimited(f"HTTP {e.code}: {body}") from None
+        raise RuntimeError(f"HTTP {e.code}: {body}") from None
+
+
+class RateLimited(RuntimeError):
+    """인스타 요청 제한·동작 차단 (2026-10-24: 게시는 됐는데 403 → 기록 못 남겨 카드 4번 중복). 이 실행에서는 더 요청하지 않는다."""
+
+
+def find_existing(user, token, caption, media_types, hours=36):
+    """최근 게시물 중 캡션이 같은 것이 있으면 (media_id, permalink, timestamp) — 기록 파일이 없어도 중복 게시를 막는다."""
+    head = caption.strip()[:80]
+    data = call("GET", f"{user}/media", token, {"fields": "id,caption,media_type,permalink,timestamp", "limit": "12"}).get("data", [])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for m in data:
+        ts = datetime.datetime.strptime(m["timestamp"], "%Y-%m-%dT%H:%M:%S%z")
+        if m.get("media_type") in media_types and (m.get("caption") or "").strip()[:80] == head and now - ts < datetime.timedelta(hours=hours):
+            return {"media_id": m["id"], "permalink": m.get("permalink"), "timestamp": m["timestamp"]}
+    return None
+
+
+def record(path, media_id, token, extra=None):
+    """게시 직후 바로 기록부터 남기고, 주소 조회는 실패해도 넘어간다."""
+    info = {"media_id": media_id, **(extra or {})}
+    path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+    if "permalink" not in info:
+        try:
+            info.update(call("GET", media_id, token, {"fields": "permalink,timestamp"}))
+            path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[warn] 주소 조회 실패(게시는 됨, 기록 남김): {e}")
+    return info.get("permalink") or media_id
+
+
+def publish_checked(user, token, creation_id, caption, media_types, out_path):
+    """media_publish 가 오류를 돌려줘도 실제로 올라갔으면 기록하고 성공으로 본다."""
+    try:
+        media_id = call("POST", f"{user}/media_publish", token, {"creation_id": creation_id})["id"]
+    except Exception as e:
+        time.sleep(15)
+        found = find_existing(user, token, caption, media_types, hours=1)
+        if not found:
+            raise
+        print(f"[warn] 게시 요청은 오류였지만 실제로 올라감 → 기록: {e}")
+        return record(out_path, found["media_id"], token, found)
+    return record(out_path, media_id, token)
 
 
 def wait_public(url, tries=40):
@@ -43,13 +89,14 @@ def wait_public(url, tries=40):
 
 
 def wait_finished(cid, token, tries=40):
+    time.sleep(5)   # 바로 묻지 않고 조금 기다렸다가 (요청 수 줄이기)
     for _ in range(tries):
         code = call("GET", cid, token, {"fields": "status_code"}).get("status_code")
         if code == "FINISHED":
             return
         if code in ("ERROR", "EXPIRED"):
             raise RuntimeError(f"container {cid} status={code}")
-        time.sleep(3)
+        time.sleep(5)
     raise RuntimeError(f"container {cid} 처리 시간 초과")
 
 
@@ -58,6 +105,10 @@ def publish(post_dir, acct):
     rel = post_dir.relative_to(ROOT).as_posix()
     images = sorted(post_dir.glob("*.jpg"))
     caption = (post_dir / "caption.txt").read_text(encoding="utf-8").strip()
+    found = find_existing(user, token, caption, ("CAROUSEL_ALBUM",))
+    if found:   # 이미 올라가 있음(기록만 빠짐) → 다시 올리지 않는다
+        print(f"[skip] 같은 캡션 카드가 이미 있음 → 기록만: {found['permalink']}")
+        return record(post_dir / "published.json", found["media_id"], token, found)
     children = []
     for img in images:
         url = f"{RAW}/{rel}/{img.name}"
@@ -68,13 +119,10 @@ def publish(post_dir, acct):
     carousel = call("POST", f"{user}/media", token,
                     {"media_type": "CAROUSEL", "children": ",".join(children), "caption": caption})["id"]
     wait_finished(carousel, token)
-    media_id = call("POST", f"{user}/media_publish", token, {"creation_id": carousel})["id"]
-    info = call("GET", media_id, token, {"fields": "permalink,timestamp"})
-    (post_dir / "published.json").write_text(
-        json.dumps({"media_id": media_id, **info}, ensure_ascii=False, indent=2), encoding="utf-8")
+    link = publish_checked(user, token, carousel, caption, ("CAROUSEL_ALBUM",), post_dir / "published.json")
     for img in images:
         img.unlink()
-    return info.get("permalink")
+    return link
 
 
 def publish_reel(post_dir, acct):
@@ -83,6 +131,10 @@ def publish_reel(post_dir, acct):
     rel = post_dir.relative_to(ROOT).as_posix()
     video, cover = post_dir / "reel.mp4", post_dir / "reel_cover.jpg"
     caption = (post_dir / "caption.txt").read_text(encoding="utf-8").strip()
+    found = find_existing(user, token, caption, ("VIDEO", "REELS"))
+    if found:
+        print(f"[skip] 같은 캡션 릴스가 이미 있음 → 기록만: {found['permalink']}")
+        return record(post_dir / "reel_published.json", found["media_id"], token, found)
     params = {"media_type": "REELS", "video_url": f"{RAW}/{rel}/reel.mp4", "caption": caption, "share_to_feed": "true"}
     wait_public(params["video_url"])
     if cover.exists():
@@ -90,13 +142,10 @@ def publish_reel(post_dir, acct):
         wait_public(params["cover_url"])
     cid = call("POST", f"{user}/media", token, params)["id"]
     wait_finished(cid, token, tries=120)   # 영상 처리는 1분 안팎, 최대 6분 대기
-    media_id = call("POST", f"{user}/media_publish", token, {"creation_id": cid})["id"]
-    info = call("GET", media_id, token, {"fields": "permalink,timestamp"})
-    (post_dir / "reel_published.json").write_text(
-        json.dumps({"media_id": media_id, **info}, ensure_ascii=False, indent=2), encoding="utf-8")
+    link = publish_checked(user, token, cid, caption, ("VIDEO", "REELS"), post_dir / "reel_published.json")
     video.unlink()   # 저장소가 커지지 않게 영상은 지운다
     cover.unlink(missing_ok=True)
-    return info.get("permalink")
+    return link
 
 
 PUBLISH_AT = datetime.time(7, 30)   # 50·60대 활동 시간. 이 시각 전에는 절대 게시하지 않는다
@@ -137,6 +186,9 @@ def main():
             try:
                 link = publish(post_dir, accounts[client])
                 print(f"[published] {client}/{date} → {link}")
+            except RateLimited as e:
+                print(f"[ERROR] {client}/{date}: 요청 제한 — 이 실행은 여기서 멈춤: {e}")
+                sys.exit(1)
             except Exception as e:  # 한 건이 실패해도 나머지는 진행
                 failed = True
                 print(f"[ERROR] {client}/{date}: {e}")
@@ -145,6 +197,9 @@ def main():
             try:
                 link = publish_reel(post_dir, accounts[client])
                 print(f"[reel] {client}/{date} → {link}")
+            except RateLimited as e:
+                print(f"[ERROR] {client}/{date} 릴스: 요청 제한 — 이 실행은 여기서 멈춤: {e}")
+                sys.exit(1)
             except Exception as e:  # 릴스가 실패해도 카드 게시는 그대로
                 failed = True
                 print(f"[ERROR] {client}/{date} 릴스: {e}")
