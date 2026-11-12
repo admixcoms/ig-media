@@ -32,8 +32,19 @@ jobs:
         run: python publisher/publish_due.py
       - name: commit results
         if: always()
+        # PC 실행과 외부 예약(cron-job.org)이 같은 날 둘 다 돌면 두 번째 실행이 같은 기록 파일을 다시 써서 부딪힌다(11/12).
+        # 부딪히면 먼저 저장된 기록(저장소 쪽)을 둔다(-X ours: rebase 에서 ours = 저장소). 그래도 안 되면 저장소 상태로 돌리고 넘어간다
+        # — 기록이 빠져도 다음 실행은 같은 캡션 확인으로 다시 올리지 않는다.
         run: |
           git config user.name "ig-publisher"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || (git commit -m "published $(TZ=Asia/Seoul date +%F)" && git pull --rebase && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "published $(TZ=Asia/Seoul date +%F)"
+          if ! git pull --rebase -X ours; then
+            echo "[warn] record conflict - keep the record already saved"
+            git rebase --abort || true
+            git reset --hard "@{u}"
+            exit 0
+          fi
+          git push
